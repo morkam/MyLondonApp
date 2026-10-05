@@ -55,6 +55,7 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 let tracks = {};   // filename -> [[lat,lon],...]
 let cells = {};    // cellKey -> {ways:[{id,pts}], cafes:[{id,name,lat,lon}]}
 let loadedKeys = new Set(); // cells included in stats
+let skipped = 0;
 
 // ---------- map ----------
 const map = L.map('map', { preferCanvas: true, zoomControl: false }).setView([51.5074, -0.1278], 13);
@@ -67,19 +68,19 @@ function parseGpx(text) {
   return [...doc.getElementsByTagName('trkpt')].map(p => [+p.getAttribute('lat'), +p.getAttribute('lon')]);
 }
 $('file').onchange = async e => {
-  let n = 0;
+  let n = 0; skipped = 0;
   for (const f of e.target.files) {
     try {
       if (/\.zip$/i.test(f.name)) {
         const z = await JSZip.loadAsync(f);
         for (const name of Object.keys(z.files)) {
-          if (/\.gpx$/i.test(name)) { const pts = parseGpx(await z.files[name].async('string')); if (pts.length) { tracks[name] = pts.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); n++; } }
+          if (/\.gpx$/i.test(name)) { const pts = parseGpx(await z.files[name].async('string')); if (pts.length) { tracks[name] = pts.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); n++; } else skipped++; }
         }
       } else {
         const pts = parseGpx(await f.text());
-        if (pts.length) { tracks[f.name] = pts.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); n++; }
+        if (pts.length) { tracks[f.name] = pts.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); n++; } else skipped++;
       }
-    } catch (err) { msg('Could not read ' + f.name + ': ' + err.message); }
+    } catch (err) { skipped++; }
   }
   await kvSet('tracks', tracks);
   msg(n + ' walk(s) imported. Loading street data…');
@@ -202,7 +203,8 @@ function recompute(fit) {
   $('s2').textContent = `${cafeVis} / ${cafeTot}`;
   $('s2t').textContent = 'cafes visited';
   $('b2').style.width = pct(cafeVis, cafeTot) + '%';
-  msg(`Area covered: ${loadedKeys.size} map cell(s). Blue = walked, orange = visited cafe.`);
+  let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 300) tk += d; }
+  msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Blue = walked, orange = visited cafe.`);
   if (fit && bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.1));
 }
 
