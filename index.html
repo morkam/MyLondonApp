@@ -32,7 +32,7 @@
   </div>
   <label class="btn">Import walks<input id="file" type="file" multiple hidden></label>
   <button class="alt" id="all">Load all London</button>
-  <div id="msg">Import GPX files from Apple Health (workout-routes folder).</div>
+  <div id="msg">Import Timeline.json (Google Maps) or GPX files.</div>
 </div>
 
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
@@ -62,6 +62,33 @@ const map = L.map('map', { preferCanvas: true, zoomControl: false }).setView([51
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
 const layer = L.layerGroup().addTo(map);
 
+
+// ---------- Google Timeline.json ----------
+function parseLL(v) { const m = /(-?\d+(?:\.\d+)?)°?\s*,\s*(-?\d+(?:\.\d+)?)°?/.exec(typeof v === 'string' ? v : ''); return m ? [+m[1], +m[2]] : null; }
+function timelineTracks(j) {
+  const segs = Array.isArray(j) ? j : (j.semanticSegments || []);
+  const out = [];
+  for (const s of segs) {
+    if (!s.timelinePath) continue;
+    const base = Date.parse(s.startTime);
+    let cur = [], prev = null;
+    for (const e of s.timelinePath) {
+      const ll = parseLL(e.point || e.latLng);
+      if (!ll) continue;
+      let t = Date.parse(e.time);
+      if (!t && e.durationMinutesOffsetFromStartTime) t = base + (+e.durationMinutesOffsetFromStartTime) * 60000;
+      if (prev && t && prev.t) {
+        const dt = (t - prev.t) / 1000, d = dist(prev.ll, ll);
+        if (dt <= 0 || dt > 1800 || d / dt > 2.5) { if (cur.length > 1) out.push(cur); cur = []; }
+      }
+      cur.push(ll); prev = { ll, t };
+    }
+    if (cur.length > 1) out.push(cur);
+  }
+  return out;
+}
+const inLondon = p => p[0] > 51.28 && p[0] < 51.70 && p[1] > -0.51 && p[1] < 0.34;
+
 // ---------- GPX import ----------
 function parseGpx(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
@@ -71,7 +98,12 @@ $('file').onchange = async e => {
   let n = 0; skipped = 0;
   for (const f of e.target.files) {
     try {
-      if (/\.zip$/i.test(f.name)) {
+      if (/\.json$/i.test(f.name)) {
+        const list = timelineTracks(JSON.parse(await f.text())).filter(t => t.some(inLondon));
+        list.forEach((t, i) => { tracks[f.name + '#' + i] = t.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); });
+        n += list.length;
+        if (!list.length) skipped++;
+      } else if (/\.zip$/i.test(f.name)) {
         const z = await JSZip.loadAsync(f);
         for (const name of Object.keys(z.files)) {
           if (/\.gpx$/i.test(name)) { const pts = parseGpx(await z.files[name].async('string')); if (pts.length) { tracks[name] = pts.map(p => [+p[0].toFixed(5), +p[1].toFixed(5)]); n++; } else skipped++; }
@@ -121,7 +153,7 @@ async function fetchCell(k) {
 }
 async function ensureCellsForTracks() {
   const keys = new Set();
-  for (const pts of Object.values(tracks)) for (const p of pts) keys.add(cellKey(p[0], p[1]));
+  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) keys.add(cellKey(p[0], p[1]));
   loadedKeys = keys;
   let i = 0;
   for (const k of keys) {
@@ -150,7 +182,7 @@ function buildIndex() {
   for (const pts of Object.values(tracks)) {
     for (let i = 0; i < pts.length; i++) {
       add(pts[i]);
-      if (i) { const d = dist(pts[i-1], pts[i]); if (d > 10 && d < 300) { const m = Math.ceil(d / 10); for (let j = 1; j < m; j++) add([pts[i-1][0] + (pts[i][0]-pts[i-1][0])*j/m, pts[i-1][1] + (pts[i][1]-pts[i-1][1])*j/m]); } }
+      if (i) { const d = dist(pts[i-1], pts[i]); if (d > 10 && d < 800) { const m = Math.ceil(d / 10); for (let j = 1; j < m; j++) add([pts[i-1][0] + (pts[i][0]-pts[i-1][0])*j/m, pts[i-1][1] + (pts[i][1]-pts[i-1][1])*j/m]); } }
     }
   }
   return idx;
@@ -195,7 +227,7 @@ function recompute(fit) {
       ).bindPopup(f.name + (v ? ' ✓' : '')).addTo(layer);
     }
   }
-  for (const pts of Object.values(tracks)) for (const p of pts) bounds.push(p);
+  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) bounds.push(p);
   const pct = (a, b) => b ? (100 * a / b) : 0;
   $('s1').textContent = pct(walked, tot).toFixed(1) + '%';
   $('s1t').textContent = `${(walked/1000).toFixed(1)} of ${(tot/1000).toFixed(0)} km`;
@@ -203,7 +235,7 @@ function recompute(fit) {
   $('s2').textContent = `${cafeVis} / ${cafeTot}`;
   $('s2t').textContent = 'cafes visited';
   $('b2').style.width = pct(cafeVis, cafeTot) + '%';
-  let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 300) tk += d; }
+  let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 800) tk += d; }
   msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Blue = walked, orange = visited cafe.`);
   if (fit && bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.1));
 }
@@ -213,7 +245,7 @@ function recompute(fit) {
   tracks = await kvGet('tracks', {});
   cells = await kvGet('cells', {});
   if (Object.keys(tracks).length) {
-    for (const pts of Object.values(tracks)) for (const p of pts) loadedKeys.add(cellKey(p[0], p[1]));
+    for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) loadedKeys.add(cellKey(p[0], p[1]));
     recompute(true);
   }
 })();
