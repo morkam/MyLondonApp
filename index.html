@@ -229,17 +229,28 @@ function recomputeStreets(fit) {
     const c = cells[k]; if (!c) continue;
     for (const w of c.ways) {
       if (seen.has(w.id)) continue; seen.add(w.id);
-      let run = [w.pts[0]], runWalked = null;
-      const flush = () => { if (run.length > 1) L.polyline(run, runWalked ? { color: '#2563eb', weight: 4, opacity: .9 } : { color: '#9ca3af', weight: 1.2, opacity: .6 }).addTo(layer); };
+      // split the street into ~12 m pieces and test each piece against your path
+      const runs = []; let wayLen = 0;
       for (let i = 1; i < w.pts.length; i++) {
         const a = w.pts[i-1], b = w.pts[i], len = dist(a, b);
-        const isW = near([(a[0]+b[0])/2, (a[1]+b[1])/2], 20) || near(a, 20);
-        tot += len; if (isW) walked += len;
-        if (runWalked === null) runWalked = isW;
-        if (isW !== runWalked) { flush(); run = [a]; runWalked = isW; }
-        run.push(b);
+        if (!len) continue;
+        const n = Math.max(1, Math.ceil(len / 12));
+        const lerp = f => [a[0] + (b[0]-a[0])*f, a[1] + (b[1]-a[1])*f];
+        for (let k = 0; k < n; k++) {
+          const walkedPiece = near(lerp((k + .5) / n), 12);
+          let r = runs[runs.length - 1];
+          if (!r || r.walked !== walkedPiece) { r = { walked: walkedPiece, len: 0, pts: [lerp(k / n)] }; runs.push(r); }
+          r.pts.push(lerp((k + 1) / n)); r.len += len / n;
+        }
+        wayLen += len;
       }
-      flush();
+      for (const r of runs) {
+        // a short walked stub on a longer street is a side street you only passed
+        if (r.walked && r.len < 30 && r.len < wayLen - 0.5) r.walked = false;
+        if (r.walked) walked += r.len;
+        L.polyline(r.pts, r.walked ? { color: '#2563eb', weight: 4, opacity: .9 } : { color: '#9ca3af', weight: 1.2, opacity: .6 }).addTo(layer);
+      }
+      tot += wayLen;
     }
   }
   const pct = tot ? 100 * walked / tot : 0;
