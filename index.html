@@ -76,23 +76,34 @@ const placeLayer = L.layerGroup().addTo(map);
 function parseLL(v) { const m = /(-?\d+(?:\.\d+)?)°?\s*,\s*(-?\d+(?:\.\d+)?)°?/.exec(typeof v === 'string' ? v : ''); return m ? [+m[1], +m[2]] : null; }
 function timelineTracks(j) {
   const segs = Array.isArray(j) ? j : (j.semanticSegments || []);
+  // Google's own "walking" labels, as time intervals
+  const walk = [];
+  for (const s of segs) {
+    const ty = s.activity && s.activity.topCandidate && s.activity.topCandidate.type;
+    if (ty && /walk|on_foot/i.test(ty)) { const a = Date.parse(s.startTime), b = Date.parse(s.endTime); if (a && b) walk.push([a, b]); }
+  }
+  walk.sort((x, y) => x[0] - y[0]);
+  const useLabels = walk.length > 0;
+  const inWalk = t => { let lo = 0, hi = walk.length - 1; while (lo <= hi) { const m = (lo + hi) >> 1; if (t < walk[m][0]) hi = m - 1; else if (t > walk[m][1]) lo = m + 1; else return true; } return false; };
   const out = [];
   for (const s of segs) {
     if (!s.timelinePath) continue;
     const base = Date.parse(s.startTime);
     let cur = [], prev = null;
+    const cut = () => { if (cur.length > 1) out.push(cur); cur = []; prev = null; };
     for (const e of s.timelinePath) {
       const ll = parseLL(e.point || e.latLng);
       if (!ll) continue;
       let t = Date.parse(e.time);
       if (!t && e.durationMinutesOffsetFromStartTime) t = base + (+e.durationMinutesOffsetFromStartTime) * 60000;
+      if (useLabels && t && !inWalk(t)) { cut(); continue; }
       if (prev && t && prev.t) {
         const dt = (t - prev.t) / 1000, d = dist(prev.ll, ll);
-        if (dt <= 0 || dt > 1800 || d / dt > 2.5) { if (cur.length > 1) out.push(cur); cur = []; }
+        if (dt <= 0 || dt > 1800 || d / dt > 3) cut();
       }
       cur.push(ll); prev = { ll, t };
     }
-    if (cur.length > 1) out.push(cur);
+    cut();
   }
   return out;
 }
