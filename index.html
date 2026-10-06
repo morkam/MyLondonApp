@@ -35,6 +35,7 @@
   <select id="cat"></select>
   <label class="btn">Import walks<input id="file" type="file" multiple hidden></label>
   <details><summary>More</summary>
+    <label style="display:block;margin-bottom:6px"><input type="checkbox" id="vo" checked> Stats for current view only</label>
     <button class="alt" id="all">Load all London</button>
     <button class="alt" id="rw">Reset walks</button>
     <button class="alt" id="ra">Reset all</button>
@@ -65,6 +66,8 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 
 let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
 let loadedKeys = new Set(), skipped = 0, idx = new Map();
+let allMode = false, viewOnly = true, ut = null;
+let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [];
 
 // ---------- map ----------
 const map = L.map('map', { preferCanvas: true, zoomControl: false, tapHold: true }).setView([51.5074, -0.1278], 13);
@@ -192,14 +195,40 @@ async function fetchAll(keys) {
   }
   return true;
 }
+function allLondonKeys() {
+  const keys = new Set();
+  for (let la = 51.28; la < 51.70; la += LAT_STEP) for (let lo = -0.51; lo < 0.34; lo += LON_STEP) keys.add(cellKey(la, lo));
+  return keys;
+}
+function trackKeys() {
+  const keys = new Set();
+  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) keys.add(cellKey(p[0], p[1]));
+  return keys;
+}
+function setAllBtn() { $('all').textContent = allMode ? 'Only my walked areas' : 'Load all London'; }
 $('all').onclick = async () => {
-  const keys = [];
-  for (let la = 51.28; la < 51.70; la += LAT_STEP) for (let lo = -0.51; lo < 0.34; lo += LON_STEP) keys.push(cellKey(la, lo));
-  const uniq = [...new Set(keys)];
-  loadedKeys = new Set(uniq);
-  await fetchAll(uniq);
+  allMode = !allMode; await kvSet('allMode', allMode); setAllBtn();
+  loadedKeys = allMode ? allLondonKeys() : trackKeys();
   recomputeStreets(false);
+  if (allMode) { await fetchAll([...loadedKeys]); recomputeStreets(false); }
 };
+$('vo').onchange = () => { viewOnly = $('vo').checked; kvSet('viewOnly', viewOnly); updateStats(); };
+map.on('moveend', () => { clearTimeout(ut); ut = setTimeout(updateStats, 150); });
+function updateStats() {
+  const b = viewOnly ? map.getBounds() : null;
+  const inb = (la, lo) => !b || (la >= b.getSouth() && la <= b.getNorth() && lo >= b.getWest() && lo <= b.getEast());
+  let tot = 0, w = 0, pt = 0, pv = 0;
+  for (let i = 0; i < sLat.length; i++) if (inb(sLat[i], sLon[i])) { tot += sLen[i]; if (sW[i]) w += sLen[i]; }
+  for (let i = 0; i < pLat.length; i++) if (inb(pLat[i], pLon[i])) { pt++; if (pVis[i]) pv++; }
+  const sfx = viewOnly ? ' in view' : '';
+  const pct = tot ? 100 * w / tot : 0;
+  $('s1').textContent = pct.toFixed(1) + '%';
+  $('s1t').textContent = `${(w/1000).toFixed(1)} of ${(tot/1000).toFixed(tot < 100000 ? 1 : 0)} km${sfx}`;
+  $('b1').style.width = pct + '%';
+  $('s2').textContent = `${pv} / ${pt}`;
+  $('s2t').textContent = CATS[cat].toLowerCase() + ' visited' + sfx;
+  $('b2').style.width = (pt ? 100 * pv / pt : 0) + '%';
+}
 
 // ---------- coverage ----------
 function buildIndex() {
@@ -224,7 +253,8 @@ function near(p, r) {
 function recomputeStreets(fit) {
   layer.clearLayers();
   idx = buildIndex();
-  let tot = 0, walked = 0; const seen = new Set();
+  sLat = []; sLon = []; sLen = []; sW = [];
+  const seen = new Set();
   for (const k of loadedKeys) {
     const c = cells[k]; if (!c) continue;
     for (const w of c.ways) {
@@ -236,27 +266,30 @@ function recomputeStreets(fit) {
         if (!len) continue;
         const n = Math.max(1, Math.ceil(len / 12));
         const lerp = f => [a[0] + (b[0]-a[0])*f, a[1] + (b[1]-a[1])*f];
-        for (let k = 0; k < n; k++) {
-          const walkedPiece = near(lerp((k + .5) / n), 12);
+        for (let k2 = 0; k2 < n; k2++) {
+          const walkedPiece = near(lerp((k2 + .5) / n), 12);
           let r = runs[runs.length - 1];
-          if (!r || r.walked !== walkedPiece) { r = { walked: walkedPiece, len: 0, pts: [lerp(k / n)] }; runs.push(r); }
-          r.pts.push(lerp((k + 1) / n)); r.len += len / n;
+          if (!r || r.walked !== walkedPiece) { r = { walked: walkedPiece, len: 0, pts: [lerp(k2 / n)] }; runs.push(r); }
+          r.pts.push(lerp((k2 + 1) / n)); r.len += len / n;
         }
         wayLen += len;
       }
       for (const r of runs) {
         // a short walked stub on a longer street is a side street you only passed
         if (r.walked && r.len < 30 && r.len < wayLen - 0.5) r.walked = false;
-        if (r.walked) walked += r.len;
+        let acc = 0, st = r.pts[0];
+        for (let i = 1; i < r.pts.length; i++) {
+          acc += dist(r.pts[i-1], r.pts[i]);
+          if (acc >= 100 || i === r.pts.length - 1) {
+            const p = r.pts[i];
+            sLat.push((st[0] + p[0]) / 2); sLon.push((st[1] + p[1]) / 2); sLen.push(acc); sW.push(r.walked ? 1 : 0);
+            acc = 0; st = p;
+          }
+        }
         L.polyline(r.pts, r.walked ? { color: '#2563eb', weight: 4, opacity: .9 } : { color: '#9ca3af', weight: 1.2, opacity: .6 }).addTo(layer);
       }
-      tot += wayLen;
     }
   }
-  const pct = tot ? 100 * walked / tot : 0;
-  $('s1').textContent = pct.toFixed(1) + '%';
-  $('s1t').textContent = `${(walked/1000).toFixed(1)} of ${(tot/1000).toFixed(0)} km`;
-  $('b1').style.width = pct + '%';
   let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 800) tk += d; }
   msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Long-press a place to flip visited.`);
   renderPlaces();
@@ -274,6 +307,7 @@ function toggle(p, auto) {
 }
 function renderPlaces() {
   placeLayer.clearLayers();
+  pLat = []; pLon = []; pVis = [];
   const seen = new Set(); let tot = 0, vis = 0;
   for (const k of loadedKeys) {
     const c = cells[k]; if (!c || !c.places) continue;
@@ -282,6 +316,7 @@ function renderPlaces() {
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
       tot++; if (v) vis++;
+      pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0);
       const m = L.circleMarker([p.lat, p.lon], v
         ? { radius: 7, color: manual ? '#111' : '#92400e', weight: 2, fillColor: '#f59e0b', fillOpacity: 1 }
         : { radius: 5, color: '#78716c', weight: 1, fillColor: '#a8a29e', fillOpacity: .35 });
@@ -296,9 +331,7 @@ function renderPlaces() {
       m.addTo(placeLayer);
     }
   }
-  $('s2').textContent = `${vis} / ${tot}`;
-  $('s2t').textContent = CATS[cat].toLowerCase() + ' visited';
-  $('b2').style.width = (tot ? 100 * vis / tot : 0) + '%';
+  updateStats();
 }
 $('cat').onchange = () => { cat = $('cat').value; kvSet('cat', cat); renderPlaces(); };
 
@@ -309,7 +342,7 @@ $('rw').onclick = async () => {
 };
 $('ra').onclick = async () => {
   if (!confirm('Delete walks, manual marks and downloaded map data?')) return;
-  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set();
+  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false);
   await kvSet('tracks', tracks); await kvSet('cells', cells); await kvSet('overrides', overrides); recomputeStreets(false);
 };
 
@@ -319,7 +352,9 @@ $('ra').onclick = async () => {
   cells = await kvGet('cells', {});
   overrides = await kvGet('overrides', {});
   cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
-  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) loadedKeys.add(cellKey(p[0], p[1]));
+  allMode = await kvGet('allMode', false); setAllBtn();
+  viewOnly = await kvGet('viewOnly', true); $('vo').checked = viewOnly;
+  loadedKeys = allMode ? allLondonKeys() : trackKeys();
   recomputeStreets(true);
   // fetch restaurants/pubs/etc. for cells cached before categories existed
   const missing = [...loadedKeys].filter(k => !(cells[k] && cells[k].places));
