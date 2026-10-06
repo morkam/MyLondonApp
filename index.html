@@ -298,11 +298,12 @@ function recomputeStreets(fit) {
     if (b.length) map.fitBounds(L.latLngBounds(b).pad(0.1));
   }
 }
-function toggle(p, auto) {
-  const cur = p.id in overrides ? overrides[p.id] : auto, next = !cur;
-  if (next === auto) delete overrides[p.id]; else overrides[p.id] = next;
+function setVisited(p, auto, val) {
+  if (val) overrides[p.id] = true;          // long press / button: done, and it stays done
+  else if (auto) overrides[p.id] = false;   // near your path but you say not visited
+  else delete overrides[p.id];
   kvSet('overrides', overrides);
-  msg(`${p.name}: marked ${next ? 'visited' : 'not visited'}`);
+  msg(`${p.name}: marked ${val ? 'visited' : 'not visited'}`);
   renderPlaces();
 }
 function renderPlaces() {
@@ -324,10 +325,10 @@ function renderPlaces() {
         const el = document.createElement('div');
         const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : '');
         const btn = document.createElement('button'); btn.textContent = v ? 'Mark not visited' : 'Mark visited'; btn.style.marginTop = '6px';
-        btn.onclick = () => toggle(p, auto);
+        btn.onclick = () => setVisited(p, auto, !v);
         el.append(b, document.createElement('br'), btn); return el;
       });
-      m.on('contextmenu', () => toggle(p, auto));
+      m.on('contextmenu', () => setVisited(p, auto, true));
       m.addTo(placeLayer);
     }
   }
