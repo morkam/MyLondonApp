@@ -20,6 +20,8 @@
   #b1{background:#2563eb}#b2{background:#f59e0b}
   button,label.btn{font:inherit;padding:7px 10px;border:0;border-radius:8px;background:#2563eb;color:#fff;margin-right:6px;display:inline-block}
   button.alt{background:#6b7280}
+  select{font:inherit;padding:7px;border-radius:8px;margin-right:6px;border:1px solid #ccc}
+  details{margin-top:6px}summary{color:#555;font-size:13px;margin-bottom:6px}
   #msg{margin-top:6px;font-size:12px;color:#444;min-height:14px}
 </style>
 </head>
@@ -30,11 +32,18 @@
     <div><div class="big" id="s1">–</div><div class="sub" id="s1t">streets walked</div><div class="bar"><i id="b1"></i></div></div>
     <div><div class="big" id="s2">–</div><div class="sub" id="s2t">cafes visited</div><div class="bar"><i id="b2"></i></div></div>
   </div>
+  <select id="cat"></select>
   <label class="btn">Import walks<input id="file" type="file" multiple hidden></label>
-  <button class="alt" id="all">Load all London</button>
+  <details><summary>More</summary>
+    <button class="alt" id="all">Load all London</button>
+    <button class="alt" id="rw">Reset walks</button>
+    <button class="alt" id="ra">Reset all</button>
+  </details>
   <div id="msg">Import Timeline.json (Google Maps) or GPX files.</div>
 </div>
 
+<script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
+<script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/leaflet/1.9.4/leaflet.min.js"></script>
 <script src="https://cdnjs.cloudflare.com/ajax/libs/jszip/3.10.1/jszip.min.js"></script>
 <script>
@@ -42,6 +51,8 @@ const $ = id => document.getElementById(id);
 const msg = t => $('msg').textContent = t;
 const COSLAT = Math.cos(51.5 * Math.PI / 180);
 const dist = (a, b) => Math.hypot((a[1]-b[1])*COSLAT*111320, (a[0]-b[0])*110540);
+const CATS = { cafe: 'Cafes', restaurant: 'Restaurants', pub: 'Pubs', bar: 'Bars', fast_food: 'Fast food' };
+for (const k in CATS) $('cat').add(new Option(CATS[k], k));
 
 // ---------- storage (IndexedDB) ----------
 const db = new Promise((res, rej) => {
@@ -52,16 +63,14 @@ const db = new Promise((res, rej) => {
 async function kvGet(k, d) { const d0 = await db; return new Promise(res => { const q = d0.transaction('kv').objectStore('kv').get(k); q.onsuccess = () => res(q.result ?? d); q.onerror = () => res(d); }); }
 async function kvSet(k, v) { const d0 = await db; return new Promise(res => { const t = d0.transaction('kv', 'readwrite'); t.objectStore('kv').put(v, k); t.oncomplete = res; t.onerror = res; }); }
 
-let tracks = {};   // filename -> [[lat,lon],...]
-let cells = {};    // cellKey -> {ways:[{id,pts}], cafes:[{id,name,lat,lon}]}
-let loadedKeys = new Set(); // cells included in stats
-let skipped = 0;
+let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
+let loadedKeys = new Set(), skipped = 0, idx = new Map();
 
 // ---------- map ----------
-const map = L.map('map', { preferCanvas: true, zoomControl: false }).setView([51.5074, -0.1278], 13);
+const map = L.map('map', { preferCanvas: true, zoomControl: false, tapHold: true }).setView([51.5074, -0.1278], 13);
 L.tileLayer('https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' }).addTo(map);
 const layer = L.layerGroup().addTo(map);
-
+const placeLayer = L.layerGroup().addTo(map);
 
 // ---------- Google Timeline.json ----------
 function parseLL(v) { const m = /(-?\d+(?:\.\d+)?)°?\s*,\s*(-?\d+(?:\.\d+)?)°?/.exec(typeof v === 'string' ? v : ''); return m ? [+m[1], +m[2]] : null; }
@@ -89,11 +98,13 @@ function timelineTracks(j) {
 }
 const inLondon = p => p[0] > 51.28 && p[0] < 51.70 && p[1] > -0.51 && p[1] < 0.34;
 
-// ---------- GPX import ----------
+
+// ---------- import ----------
 function parseGpx(text) {
   const doc = new DOMParser().parseFromString(text, 'application/xml');
   return [...doc.getElementsByTagName('trkpt')].map(p => [+p.getAttribute('lat'), +p.getAttribute('lon')]);
 }
+
 $('file').onchange = async e => {
   let n = 0; skipped = 0;
   for (const f of e.target.files) {
@@ -115,9 +126,9 @@ $('file').onchange = async e => {
     } catch (err) { skipped++; }
   }
   await kvSet('tracks', tracks);
-  msg(n + ' walk(s) imported. Loading street data…');
+  msg(n + ' walk(s) imported. Loading map data…');
   await ensureCellsForTracks();
-  recompute(true);
+  recomputeStreets(true);
 };
 
 // ---------- Overpass ----------
@@ -125,26 +136,31 @@ const LAT_STEP = 0.05, LON_STEP = 0.08;
 const cellKey = (la, lo) => Math.floor(la / LAT_STEP) + ',' + Math.floor(lo / LON_STEP);
 const cellBox = k => { const [a, b] = k.split(',').map(Number); return [a*LAT_STEP, b*LON_STEP, (a+1)*LAT_STEP, (b+1)*LON_STEP]; };
 const HW = 'residential|living_street|pedestrian|footway|path|service|tertiary|secondary|primary|unclassified|steps|cycleway|track|trunk|tertiary_link|secondary_link|primary_link';
+const AM = Object.keys(CATS).join('|');
 
 async function fetchCell(k) {
-  if (cells[k]) return;
+  const old = cells[k];
+  if (old && old.places) return;
+  const needWays = !old;
   const [s, w, n, e] = cellBox(k), bb = `${s},${w},${n},${e}`;
-  const q = `[out:json][timeout:90];(way["highway"~"^(${HW})$"]["footway"!~"sidewalk|crossing"]["access"!~"private|no"](${bb}););out geom;(node["amenity"="cafe"](${bb});way["amenity"="cafe"](${bb}););out center;`;
+  const q = `[out:json][timeout:90];` +
+    (needWays ? `(way["highway"~"^(${HW})$"]["footway"!~"sidewalk|crossing"]["access"!~"private|no"](${bb}););out geom;` : '') +
+    `(node["amenity"~"^(${AM})$"](${bb});way["amenity"~"^(${AM})$"](${bb}););out center;`;
   for (let attempt = 0; attempt < 3; attempt++) {
     try {
       const r = await fetch('https://overpass-api.de/api/interpreter', { method: 'POST', body: 'data=' + encodeURIComponent(q) });
       if (!r.ok) throw new Error(r.status);
       const j = await r.json();
-      const ways = [], cafes = [];
+      const ways = [], places = [];
       for (const el of j.elements) {
-        if (el.tags && el.tags.amenity === 'cafe') {
+        if (el.tags && CATS[el.tags.amenity] && !el.tags.highway) {
           const c = el.type === 'node' ? el : el.center;
-          if (c) cafes.push({ id: el.type[0] + el.id, name: el.tags.name || 'Cafe', lat: c.lat, lon: c.lon });
-        } else if (el.geometry) {
+          if (c) places.push({ id: el.type[0] + el.id, name: el.tags.name || CATS[el.tags.amenity], lat: c.lat, lon: c.lon, cat: el.tags.amenity });
+        } else if (needWays && el.geometry) {
           ways.push({ id: el.id, pts: el.geometry.map(g => [+g.lat.toFixed(6), +g.lon.toFixed(6)]) });
         }
       }
-      cells[k] = { ways, cafes };
+      cells[k] = { ways: needWays ? ways : old.ways, places };
       await kvSet('cells', cells);
       return;
     } catch (err) { await new Promise(r => setTimeout(r, 5000)); }
@@ -155,39 +171,38 @@ async function ensureCellsForTracks() {
   const keys = new Set();
   for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) keys.add(cellKey(p[0], p[1]));
   loadedKeys = keys;
+  await fetchAll([...keys]);
+}
+async function fetchAll(keys) {
   let i = 0;
   for (const k of keys) {
-    msg(`Loading map data ${++i}/${keys.size}…`);
-    try { await fetchCell(k); } catch (err) { msg(err.message); }
+    msg(`Loading map data ${++i}/${keys.length}…`);
+    try { await fetchCell(k); } catch (err) { msg(err.message); return false; }
   }
+  return true;
 }
 $('all').onclick = async () => {
   const keys = [];
   for (let la = 51.28; la < 51.70; la += LAT_STEP) for (let lo = -0.51; lo < 0.34; lo += LON_STEP) keys.push(cellKey(la, lo));
   const uniq = [...new Set(keys)];
   loadedKeys = new Set(uniq);
-  let i = 0;
-  for (const k of uniq) {
-    msg(`Loading London ${++i}/${uniq.length} (cached after first time)…`);
-    try { await fetchCell(k); } catch (err) { msg(err.message); break; }
-    if (i % 5 === 0) recompute(false);
-  }
-  recompute(false);
+  await fetchAll(uniq);
+  recomputeStreets(false);
 };
 
 // ---------- coverage ----------
 function buildIndex() {
-  const idx = new Map();
-  const add = p => { const k = Math.floor(p[0] / 0.0003) + ',' + Math.floor(p[1] / 0.0005); (idx.get(k) || idx.set(k, []).get(k)).push(p); };
+  const m = new Map();
+  const add = p => { const k = Math.floor(p[0] / 0.0003) + ',' + Math.floor(p[1] / 0.0005); (m.get(k) || m.set(k, []).get(k)).push(p); };
   for (const pts of Object.values(tracks)) {
     for (let i = 0; i < pts.length; i++) {
       add(pts[i]);
-      if (i) { const d = dist(pts[i-1], pts[i]); if (d > 10 && d < 800) { const m = Math.ceil(d / 10); for (let j = 1; j < m; j++) add([pts[i-1][0] + (pts[i][0]-pts[i-1][0])*j/m, pts[i-1][1] + (pts[i][1]-pts[i-1][1])*j/m]); } }
+      if (i) { const d = dist(pts[i-1], pts[i]); if (d > 10 && d < 800) { const c = Math.ceil(d / 10); for (let j = 1; j < c; j++) add([pts[i-1][0] + (pts[i][0]-pts[i-1][0])*j/c, pts[i-1][1] + (pts[i][1]-pts[i-1][1])*j/c]); } }
     }
   }
-  return idx;
+  return m;
 }
-function near(idx, p, r) {
+function near(p, r) {
   const a = Math.floor(p[0] / 0.0003), b = Math.floor(p[1] / 0.0005);
   for (let i = -1; i <= 1; i++) for (let j = -1; j <= 1; j++) {
     const c = idx.get((a+i) + ',' + (b+j)); if (!c) continue;
@@ -195,21 +210,19 @@ function near(idx, p, r) {
   }
   return false;
 }
-function recompute(fit) {
+function recomputeStreets(fit) {
   layer.clearLayers();
-  const idx = buildIndex();
-  let tot = 0, walked = 0, seenWays = new Set(), seenCafes = new Set(), cafeTot = 0, cafeVis = 0;
-  const bounds = [];
+  idx = buildIndex();
+  let tot = 0, walked = 0; const seen = new Set();
   for (const k of loadedKeys) {
     const c = cells[k]; if (!c) continue;
     for (const w of c.ways) {
-      if (seenWays.has(w.id)) continue; seenWays.add(w.id);
+      if (seen.has(w.id)) continue; seen.add(w.id);
       let run = [w.pts[0]], runWalked = null;
       const flush = () => { if (run.length > 1) L.polyline(run, runWalked ? { color: '#2563eb', weight: 4, opacity: .9 } : { color: '#9ca3af', weight: 1.2, opacity: .6 }).addTo(layer); };
       for (let i = 1; i < w.pts.length; i++) {
         const a = w.pts[i-1], b = w.pts[i], len = dist(a, b);
-        const mid = [(a[0]+b[0])/2, (a[1]+b[1])/2];
-        const isW = near(idx, mid, 20) || near(idx, a, 20);
+        const isW = near([(a[0]+b[0])/2, (a[1]+b[1])/2], 20) || near(a, 20);
         tot += len; if (isW) walked += len;
         if (runWalked === null) runWalked = isW;
         if (isW !== runWalked) { flush(); run = [a]; runWalked = isW; }
@@ -217,37 +230,78 @@ function recompute(fit) {
       }
       flush();
     }
-    for (const f of c.cafes) {
-      if (seenCafes.has(f.id)) continue; seenCafes.add(f.id);
-      const v = near(idx, [f.lat, f.lon], 30);
-      cafeTot++; if (v) cafeVis++;
-      L.circleMarker([f.lat, f.lon], v
-        ? { radius: 7, color: '#92400e', weight: 2, fillColor: '#f59e0b', fillOpacity: 1 }
-        : { radius: 5, color: '#78716c', weight: 1, fillColor: '#a8a29e', fillOpacity: .35 }
-      ).bindPopup(f.name + (v ? ' ✓' : '')).addTo(layer);
+  }
+  const pct = tot ? 100 * walked / tot : 0;
+  $('s1').textContent = pct.toFixed(1) + '%';
+  $('s1t').textContent = `${(walked/1000).toFixed(1)} of ${(tot/1000).toFixed(0)} km`;
+  $('b1').style.width = pct + '%';
+  let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 800) tk += d; }
+  msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Long-press a place to flip visited.`);
+  renderPlaces();
+  if (fit) {
+    const b = []; for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) b.push(p);
+    if (b.length) map.fitBounds(L.latLngBounds(b).pad(0.1));
+  }
+}
+function toggle(p, auto) {
+  const cur = p.id in overrides ? overrides[p.id] : auto, next = !cur;
+  if (next === auto) delete overrides[p.id]; else overrides[p.id] = next;
+  kvSet('overrides', overrides);
+  msg(`${p.name}: marked ${next ? 'visited' : 'not visited'}`);
+  renderPlaces();
+}
+function renderPlaces() {
+  placeLayer.clearLayers();
+  const seen = new Set(); let tot = 0, vis = 0;
+  for (const k of loadedKeys) {
+    const c = cells[k]; if (!c || !c.places) continue;
+    for (const p of c.places) {
+      if (p.cat !== cat || seen.has(p.id)) continue; seen.add(p.id);
+      const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
+      const v = manual ? overrides[p.id] : auto;
+      tot++; if (v) vis++;
+      const m = L.circleMarker([p.lat, p.lon], v
+        ? { radius: 7, color: manual ? '#111' : '#92400e', weight: 2, fillColor: '#f59e0b', fillOpacity: 1 }
+        : { radius: 5, color: '#78716c', weight: 1, fillColor: '#a8a29e', fillOpacity: .35 });
+      m.bindPopup(() => {
+        const el = document.createElement('div');
+        const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : '');
+        const btn = document.createElement('button'); btn.textContent = v ? 'Mark not visited' : 'Mark visited'; btn.style.marginTop = '6px';
+        btn.onclick = () => toggle(p, auto);
+        el.append(b, document.createElement('br'), btn); return el;
+      });
+      m.on('contextmenu', () => toggle(p, auto));
+      m.addTo(placeLayer);
     }
   }
-  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) bounds.push(p);
-  const pct = (a, b) => b ? (100 * a / b) : 0;
-  $('s1').textContent = pct(walked, tot).toFixed(1) + '%';
-  $('s1t').textContent = `${(walked/1000).toFixed(1)} of ${(tot/1000).toFixed(0)} km`;
-  $('b1').style.width = pct(walked, tot) + '%';
-  $('s2').textContent = `${cafeVis} / ${cafeTot}`;
-  $('s2t').textContent = 'cafes visited';
-  $('b2').style.width = pct(cafeVis, cafeTot) + '%';
-  let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 800) tk += d; }
-  msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Blue = walked, orange = visited cafe.`);
-  if (fit && bounds.length) map.fitBounds(L.latLngBounds(bounds).pad(0.1));
+  $('s2').textContent = `${vis} / ${tot}`;
+  $('s2t').textContent = CATS[cat].toLowerCase() + ' visited';
+  $('b2').style.width = (tot ? 100 * vis / tot : 0) + '%';
 }
+$('cat').onchange = () => { cat = $('cat').value; kvSet('cat', cat); renderPlaces(); };
+
+// ---------- reset ----------
+$('rw').onclick = async () => {
+  if (!confirm('Delete all imported walks? Map data and manual marks are kept.')) return;
+  tracks = {}; skipped = 0; loadedKeys = new Set(); await kvSet('tracks', tracks); recomputeStreets(false);
+};
+$('ra').onclick = async () => {
+  if (!confirm('Delete walks, manual marks and downloaded map data?')) return;
+  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set();
+  await kvSet('tracks', tracks); await kvSet('cells', cells); await kvSet('overrides', overrides); recomputeStreets(false);
+};
 
 // ---------- start ----------
 (async () => {
   tracks = await kvGet('tracks', {});
   cells = await kvGet('cells', {});
-  if (Object.keys(tracks).length) {
-    for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) loadedKeys.add(cellKey(p[0], p[1]));
-    recompute(true);
-  }
+  overrides = await kvGet('overrides', {});
+  cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
+  for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) loadedKeys.add(cellKey(p[0], p[1]));
+  recomputeStreets(true);
+  // fetch restaurants/pubs/etc. for cells cached before categories existed
+  const missing = [...loadedKeys].filter(k => !(cells[k] && cells[k].places));
+  if (missing.length) { await fetchAll(missing); recomputeStreets(false); }
 })();
 </script>
 </body>
