@@ -66,7 +66,7 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 
 let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
 let loadedKeys = new Set(), skipped = 0, idx = new Map();
-let allMode = false, viewOnly = true, ut = null;
+let allMode = false, viewOnly = true, ut = null, viewKeys = new Set(), autoBusy = false;
 let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [];
 
 // ---------- map ----------
@@ -205,15 +205,32 @@ function trackKeys() {
   for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) keys.add(cellKey(p[0], p[1]));
   return keys;
 }
-function setAllBtn() { $('all').textContent = allMode ? 'Only my walked areas' : 'Load all London'; }
+function cellsInView() {
+  const b = map.getBounds(), keys = new Set();
+  for (let la = Math.floor(b.getSouth() / LAT_STEP) * LAT_STEP; la <= b.getNorth(); la += LAT_STEP)
+    for (let lo = Math.floor(b.getWest() / LON_STEP) * LON_STEP; lo <= b.getEast(); lo += LON_STEP) keys.add(cellKey(la + 1e-6, lo + 1e-6));
+  return [...keys];
+}
+async function autoLoad() {
+  if (autoBusy || allMode || map.getZoom() < 12) return;
+  const keys = cellsInView().filter(k => !loadedKeys.has(k));
+  if (!keys.length || keys.length > 6) return;
+  autoBusy = true;
+  keys.forEach(k => { loadedKeys.add(k); viewKeys.add(k); });
+  await kvSet('viewKeys', [...viewKeys]);
+  await fetchAll(keys);
+  recomputeStreets(false);
+  autoBusy = false;
+}
+function setAllBtn() { $('all').textContent = allMode ? 'Back to areas I opened' : 'Load all London'; }
 $('all').onclick = async () => {
   allMode = !allMode; await kvSet('allMode', allMode); setAllBtn();
-  loadedKeys = allMode ? allLondonKeys() : trackKeys();
+  loadedKeys = allMode ? allLondonKeys() : new Set([...trackKeys(), ...viewKeys]);
   recomputeStreets(false);
   if (allMode) { await fetchAll([...loadedKeys]); recomputeStreets(false); }
 };
 $('vo').onchange = () => { viewOnly = $('vo').checked; kvSet('viewOnly', viewOnly); updateStats(); };
-map.on('moveend', () => { clearTimeout(ut); ut = setTimeout(updateStats, 150); });
+map.on('moveend', () => { clearTimeout(ut); ut = setTimeout(() => { updateStats(); autoLoad(); }, 300); });
 function updateStats() {
   const b = viewOnly ? map.getBounds() : null;
   const inb = (la, lo) => !b || (la >= b.getSouth() && la <= b.getNorth() && lo >= b.getWest() && lo <= b.getEast());
@@ -291,7 +308,7 @@ function recomputeStreets(fit) {
     }
   }
   let tk = 0; for (const pts of Object.values(tracks)) for (let i = 1; i < pts.length; i++) { const d = dist(pts[i-1], pts[i]); if (d < 800) tk += d; }
-  msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Long-press a place to flip visited.`);
+  msg(`${Object.keys(tracks).length} walks read (${(tk/1000).toFixed(1)} km)` + (skipped ? `, ${skipped} unreadable` : '') + `. ${loadedKeys.size} map cell(s). Long-press a place to mark it visited.`);
   renderPlaces();
   if (fit) {
     const b = []; for (const pts of Object.values(tracks)) for (const p of pts) if (inLondon(p)) b.push(p);
@@ -339,11 +356,11 @@ $('cat').onchange = () => { cat = $('cat').value; kvSet('cat', cat); renderPlace
 // ---------- reset ----------
 $('rw').onclick = async () => {
   if (!confirm('Delete all imported walks? Map data and manual marks are kept.')) return;
-  tracks = {}; skipped = 0; loadedKeys = new Set(); await kvSet('tracks', tracks); recomputeStreets(false);
+  tracks = {}; skipped = 0; loadedKeys = allMode ? allLondonKeys() : new Set(viewKeys); await kvSet('tracks', tracks); recomputeStreets(false);
 };
 $('ra').onclick = async () => {
   if (!confirm('Delete walks, manual marks and downloaded map data?')) return;
-  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false);
+  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false); viewKeys = new Set(); await kvSet('viewKeys', []);
   await kvSet('tracks', tracks); await kvSet('cells', cells); await kvSet('overrides', overrides); recomputeStreets(false);
 };
 
@@ -355,8 +372,10 @@ $('ra').onclick = async () => {
   cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
   allMode = await kvGet('allMode', false); setAllBtn();
   viewOnly = await kvGet('viewOnly', true); $('vo').checked = viewOnly;
-  loadedKeys = allMode ? allLondonKeys() : trackKeys();
+  viewKeys = new Set(await kvGet('viewKeys', []));
+  loadedKeys = allMode ? allLondonKeys() : new Set([...trackKeys(), ...viewKeys]);
   recomputeStreets(true);
+  autoLoad();
   // fetch restaurants/pubs/etc. for cells cached before categories existed
   const missing = [...loadedKeys].filter(k => !(cells[k] && cells[k].places));
   if (missing.length) { await fetchAll(missing); recomputeStreets(false); }
