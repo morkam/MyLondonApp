@@ -22,6 +22,9 @@
   button.alt{background:#6b7280}
   select{font:inherit;padding:7px;border-radius:8px;margin-right:6px;border:1px solid #ccc}
   details{margin-top:6px}summary{color:#555;font-size:13px;margin-bottom:6px}
+  .lbl{white-space:nowrap}
+  .lbl span{position:absolute;left:9px;top:-8px;font:600 11px -apple-system,system-ui,sans-serif;color:#222;text-shadow:0 0 3px #fff,0 0 3px #fff,0 0 3px #fff}
+  .lbl.v span{opacity:.45;font-weight:400}
   #msg{margin-top:6px;font-size:12px;color:#444;min-height:14px}
 </style>
 </head>
@@ -35,6 +38,7 @@
   <select id="cat"></select>
   <label class="btn">Import walks<input id="file" type="file" multiple hidden></label>
   <details><summary>More</summary>
+    <select id="base" style="margin-bottom:6px"><option value="light">Light map</option><option value="osm">Standard map (street names)</option></select>
     <label style="display:block;margin-bottom:6px"><input type="checkbox" id="vo" checked> Stats for current view only</label>
     <button class="alt" id="all">Load all London</button>
     <button class="alt" id="rw">Reset walks</button>
@@ -67,15 +71,24 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
 let loadedKeys = new Set(), skipped = 0, idx = new Map();
 let allMode = false, viewOnly = true, ut = null, viewKeys = new Set(), autoBusy = false;
-let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [];
+let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [], pName = [];
 
 // ---------- map ----------
 const map = L.map('map', { preferCanvas: true, zoomControl: false, tapHold: true }).setView([51.5074, -0.1278], 13);
 const ESRI = 'https://server.arcgisonline.com/ArcGIS/rest/services/Canvas/';
-L.tileLayer(ESRI + 'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 16, attribution: 'Tiles © Esri' }).addTo(map);
-L.tileLayer(ESRI + 'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 16 }).addTo(map);
+let baseLayers = [];
+function setBase(v) {
+  baseLayers.forEach(l => map.removeLayer(l));
+  baseLayers = v === 'osm'
+    ? [L.tileLayer('https://tile.openstreetmap.org/{z}/{x}/{y}.png', { maxZoom: 19, attribution: '© OpenStreetMap' })]
+    : [L.tileLayer(ESRI + 'World_Light_Gray_Base/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 16, attribution: 'Tiles © Esri' }),
+       L.tileLayer(ESRI + 'World_Light_Gray_Reference/MapServer/tile/{z}/{y}/{x}', { maxZoom: 19, maxNativeZoom: 16 })];
+  baseLayers.forEach(l => { l.addTo(map); l.bringToBack(); });
+}
+setBase('light');
 const layer = L.layerGroup().addTo(map);
 const placeLayer = L.layerGroup().addTo(map);
+const labelLayer = L.layerGroup().addTo(map);
 
 // ---------- Google Timeline.json ----------
 function parseLL(v) { const m = /(-?\d+(?:\.\d+)?)°?\s*,\s*(-?\d+(?:\.\d+)?)°?/.exec(typeof v === 'string' ? v : ''); return m ? [+m[1], +m[2]] : null; }
@@ -231,9 +244,22 @@ $('all').onclick = async () => {
   recomputeStreets(false);
   if (allMode) { await fetchAll([...loadedKeys]); recomputeStreets(false); }
 };
+$('base').onchange = () => { setBase($('base').value); kvSet('base', $('base').value); };
 $('vo').onchange = () => { viewOnly = $('vo').checked; kvSet('viewOnly', viewOnly); updateStats(); };
 map.on('moveend', () => { clearTimeout(ut); ut = setTimeout(() => { updateStats(); autoLoad(); }, 300); });
+function updateLabels() {
+  labelLayer.clearLayers();
+  if (map.getZoom() < 15) return;
+  const b = map.getBounds(); let n = 0;
+  for (let i = 0; i < pLat.length && n < 150; i++) {
+    if (!pName[i] || pLat[i] < b.getSouth() || pLat[i] > b.getNorth() || pLon[i] < b.getWest() || pLon[i] > b.getEast()) continue;
+    const el = document.createElement('span'); el.textContent = pName[i];
+    L.marker([pLat[i], pLon[i]], { interactive: false, icon: L.divIcon({ className: 'lbl' + (pVis[i] ? ' v' : ''), html: el, iconSize: [0, 0] }) }).addTo(labelLayer);
+    n++;
+  }
+}
 function updateStats() {
+  updateLabels();
   const b = viewOnly ? map.getBounds() : null;
   const inb = (la, lo) => !b || (la >= b.getSouth() && la <= b.getNorth() && lo >= b.getWest() && lo <= b.getEast());
   let tot = 0, w = 0, pt = 0, pv = 0;
@@ -327,7 +353,7 @@ function setVisited(p, auto, val) {
 }
 function renderPlaces() {
   placeLayer.clearLayers();
-  pLat = []; pLon = []; pVis = [];
+  pLat = []; pLon = []; pVis = []; pName = [];
   const seen = new Set(); let tot = 0, vis = 0;
   for (const k of loadedKeys) {
     const c = cells[k]; if (!c || !c.places) continue;
@@ -336,7 +362,7 @@ function renderPlaces() {
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
       tot++; if (v) vis++;
-      pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0);
+      pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0); pName.push(p.name === CATS[p.cat] ? '' : p.name);
       const m = L.circleMarker([p.lat, p.lon], v
         ? { radius: 6, color: manual ? '#111' : '#b45309', weight: 1, opacity: .35, fillColor: '#f59e0b', fillOpacity: .2 }
         : { radius: 6, color: '#b45309', weight: 2, opacity: 1, fillColor: '#f59e0b', fillOpacity: .95 });
@@ -374,6 +400,7 @@ $('ra').onclick = async () => {
   cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
   allMode = await kvGet('allMode', false); setAllBtn();
   viewOnly = await kvGet('viewOnly', true); $('vo').checked = viewOnly;
+  { const bv = await kvGet('base', 'light'); $('base').value = bv; setBase(bv); }
   viewKeys = new Set(await kvGet('viewKeys', []));
   loadedKeys = allMode ? allLondonKeys() : new Set([...trackKeys(), ...viewKeys]);
   recomputeStreets(true);
