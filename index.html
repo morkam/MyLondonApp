@@ -40,6 +40,7 @@
   <details><summary>More</summary>
     <select id="base" style="margin-bottom:6px"><option value="light">Light map</option><option value="osm">Standard map (street names)</option></select>
     <label style="display:block;margin-bottom:6px"><input type="checkbox" id="vo" checked> Stats for current view only</label>
+    <button class="alt" id="rf">Refresh this area</button>
     <button class="alt" id="all">Load all London</button>
     <button class="alt" id="rw">Reset walks</button>
     <button class="alt" id="ra">Reset all</button>
@@ -70,6 +71,7 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 
 let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
 let loadedKeys = new Set(), skipped = 0, idx = new Map();
+let customs = [];
 let allMode = false, viewOnly = true, ut = null, viewKeys = new Set(), autoBusy = false;
 let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [], pName = [];
 
@@ -167,10 +169,10 @@ const cellBox = k => { const [a, b] = k.split(',').map(Number); return [a*LAT_ST
 const HW = 'residential|living_street|pedestrian|footway|path|service|tertiary|secondary|primary|unclassified|steps|cycleway|track|trunk|tertiary_link|secondary_link|primary_link';
 const AM = Object.keys(CATS).join('|');
 
-async function fetchCell(k) {
+async function fetchCell(k, force) {
   const old = cells[k];
-  if (old && old.places) return;
-  const needWays = !old;
+  if (!force && old && old.places) return;
+  const needWays = force || !old;
   const [s, w, n, e] = cellBox(k), bb = `${s},${w},${n},${e}`;
   const q = `[out:json][timeout:90];` +
     (needWays ? `(way["highway"~"^(${HW})$"]["footway"!~"sidewalk|crossing"]["access"!~"private|no"](${bb}););out geom;` : '') +
@@ -355,23 +357,31 @@ function renderPlaces() {
   placeLayer.clearLayers();
   pLat = []; pLon = []; pVis = []; pName = [];
   const seen = new Set(); let tot = 0, vis = 0;
-  for (const k of loadedKeys) {
-    const c = cells[k]; if (!c || !c.places) continue;
-    for (const p of c.places) {
+  const all = [];
+  for (const k of loadedKeys) { const c = cells[k]; if (c && c.places) all.push(...c.places); }
+  for (const c of customs) all.push({ ...c, custom: true });
+  {
+    for (const p of all) {
       if (p.cat !== cat || seen.has(p.id)) continue; seen.add(p.id);
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
       tot++; if (v) vis++;
       pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0); pName.push(p.name === CATS[p.cat] ? '' : p.name);
       const m = L.circleMarker([p.lat, p.lon], v
-        ? { radius: 6, color: manual ? '#111' : '#b45309', weight: 1, opacity: .35, fillColor: '#f59e0b', fillOpacity: .2 }
-        : { radius: 6, color: '#b45309', weight: 2, opacity: 1, fillColor: '#f59e0b', fillOpacity: .95 });
+        ? { radius: 6, color: manual ? '#111' : '#b45309', weight: 1, opacity: .35, fillColor: '#f59e0b', fillOpacity: .2, bubblingMouseEvents: false }
+        : { radius: 6, color: '#b45309', weight: 2, opacity: 1, fillColor: '#f59e0b', fillOpacity: .95, bubblingMouseEvents: false });
       m.bindPopup(() => {
         const el = document.createElement('div');
         const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : '');
         const btn = document.createElement('button'); btn.textContent = v ? 'Mark not visited' : 'Mark visited'; btn.style.marginTop = '6px';
         btn.onclick = () => setVisited(p, auto, !v);
-        el.append(b, document.createElement('br'), btn); return el;
+        el.append(b, document.createElement('br'), btn);
+        if (p.custom) {
+          const del = document.createElement('button'); del.textContent = 'Delete this place'; del.className = 'alt'; del.style.marginTop = '6px';
+          del.onclick = () => { customs = customs.filter(c => c.id !== p.id); delete overrides[p.id]; kvSet('custom', customs); kvSet('overrides', overrides); map.closePopup(); renderPlaces(); };
+          el.append(document.createElement('br'), del);
+        }
+        return el;
       });
       m.on('contextmenu', () => setVisited(p, auto, true));
       m.addTo(placeLayer);
@@ -379,6 +389,27 @@ function renderPlaces() {
   }
   updateStats();
 }
+map.on('contextmenu', e => {
+  const name = prompt(`Add a new place to "${CATS[cat]}" here (marked visited). Name:`);
+  if (name === null) return;
+  const id = 'c' + Date.now();
+  customs.push({ id, name: name.trim() || CATS[cat], lat: e.latlng.lat, lon: e.latlng.lng, cat });
+  overrides[id] = true;
+  kvSet('custom', customs); kvSet('overrides', overrides);
+  renderPlaces();
+});
+$('rf').onclick = async () => {
+  const keys = cellsInView();
+  if (map.getZoom() < 12 || keys.length > 6) { msg('Zoom in a bit first, then tap Refresh this area.'); return; }
+  let i = 0;
+  for (const k of keys) {
+    msg(`Refreshing ${++i}/${keys.length}…`);
+    try { await fetchCell(k, true); loadedKeys.add(k); viewKeys.add(k); } catch (err) { msg(err.message); return; }
+  }
+  await kvSet('viewKeys', [...viewKeys]);
+  recomputeStreets(false);
+  msg('Area refreshed. Your marks and added places are kept.');
+};
 $('cat').onchange = () => { cat = $('cat').value; kvSet('cat', cat); renderPlaces(); };
 
 // ---------- reset ----------
@@ -387,8 +418,8 @@ $('rw').onclick = async () => {
   tracks = {}; skipped = 0; loadedKeys = allMode ? allLondonKeys() : new Set(viewKeys); await kvSet('tracks', tracks); recomputeStreets(false);
 };
 $('ra').onclick = async () => {
-  if (!confirm('Delete walks, manual marks and downloaded map data?')) return;
-  tracks = {}; cells = {}; overrides = {}; skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false); viewKeys = new Set(); await kvSet('viewKeys', []);
+  if (!confirm('Delete walks, your marks, added places and downloaded map data?')) return;
+  tracks = {}; cells = {}; overrides = {}; customs = []; await kvSet('custom', []); skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false); viewKeys = new Set(); await kvSet('viewKeys', []);
   await kvSet('tracks', tracks); await kvSet('cells', cells); await kvSet('overrides', overrides); recomputeStreets(false);
 };
 
@@ -397,6 +428,7 @@ $('ra').onclick = async () => {
   tracks = await kvGet('tracks', {});
   cells = await kvGet('cells', {});
   overrides = await kvGet('overrides', {});
+  customs = await kvGet('custom', []);
   cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
   allMode = await kvGet('allMode', false); setAllBtn();
   viewOnly = await kvGet('viewOnly', true); $('vo').checked = viewOnly;
