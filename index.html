@@ -358,6 +358,8 @@ function setVisited(p, auto, val) {
   msg(`${p.name}: marked ${val ? 'visited' : 'not visited'}`);
   renderPlaces();
 }
+// chains to hide (add more names separated by |)
+const HIDE = /starbucks|^costa(\s|$)|tim\s*horton/i;
 function renderPlaces() {
   placeLayer.clearLayers();
   pLat = []; pLon = []; pVis = []; pName = []; pFade = [];
@@ -368,6 +370,7 @@ function renderPlaces() {
   {
     for (const p of all) {
       if (p.cat !== cat || seen.has(p.id)) continue; seen.add(p.id);
+      if (!p.custom && HIDE.test(p.name)) continue;
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
       const wish = v && !!wishlist[p.id];
