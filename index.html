@@ -71,9 +71,9 @@ async function kvSet(k, v) { const d0 = await db; return new Promise(res => { co
 
 let tracks = {}, cells = {}, overrides = {}, cat = 'cafe';
 let loadedKeys = new Set(), skipped = 0, idx = new Map();
-let customs = [];
+let customs = [], wishlist = {};
 let allMode = false, viewOnly = true, ut = null, viewKeys = new Set(), autoBusy = false;
-let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [], pName = [];
+let sLat = [], sLon = [], sLen = [], sW = [], pLat = [], pLon = [], pVis = [], pName = [], pFade = [];
 
 // ---------- map ----------
 const map = L.map('map', { preferCanvas: true, zoomControl: false, tapHold: true }).setView([51.5074, -0.1278], 13);
@@ -256,7 +256,7 @@ function updateLabels() {
   for (let i = 0; i < pLat.length && n < 150; i++) {
     if (!pName[i] || pLat[i] < b.getSouth() || pLat[i] > b.getNorth() || pLon[i] < b.getWest() || pLon[i] > b.getEast()) continue;
     const el = document.createElement('span'); el.textContent = pName[i];
-    L.marker([pLat[i], pLon[i]], { interactive: false, icon: L.divIcon({ className: 'lbl' + (pVis[i] ? ' v' : ''), html: el, iconSize: [0, 0] }) }).addTo(labelLayer);
+    L.marker([pLat[i], pLon[i]], { interactive: false, icon: L.divIcon({ className: 'lbl' + (pFade[i] ? ' v' : ''), html: el, iconSize: [0, 0] }) }).addTo(labelLayer);
     n++;
   }
 }
@@ -345,7 +345,12 @@ function recomputeStreets(fit) {
     if (b.length) map.fitBounds(L.latLngBounds(b).pad(0.1));
   }
 }
+function setWish(p, on) {
+  if (on) wishlist[p.id] = true; else delete wishlist[p.id];
+  kvSet('wish', wishlist); msg(`${p.name}: ${on ? 'saved to go with Azadeh' : 'removed from Azadeh list'}`); renderPlaces();
+}
 function setVisited(p, auto, val) {
+  if (val && wishlist[p.id]) { delete wishlist[p.id]; kvSet('wish', wishlist); }
   if (val) overrides[p.id] = true;          // long press / button: done, and it stays done
   else if (auto) overrides[p.id] = false;   // near your path but you say not visited
   else delete overrides[p.id];
@@ -355,7 +360,7 @@ function setVisited(p, auto, val) {
 }
 function renderPlaces() {
   placeLayer.clearLayers();
-  pLat = []; pLon = []; pVis = []; pName = [];
+  pLat = []; pLon = []; pVis = []; pName = []; pFade = [];
   const seen = new Set(); let tot = 0, vis = 0;
   const all = [];
   for (const k of loadedKeys) { const c = cells[k]; if (c && c.places) all.push(...c.places); }
@@ -365,17 +370,25 @@ function renderPlaces() {
       if (p.cat !== cat || seen.has(p.id)) continue; seen.add(p.id);
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
+      const wish = !v && !!wishlist[p.id];
       tot++; if (v) vis++;
-      pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0); pName.push(p.name === CATS[p.cat] ? '' : p.name);
-      const m = L.circleMarker([p.lat, p.lon], v
+      pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0); pFade.push(v || wish ? 1 : 0); pName.push(p.name === CATS[p.cat] ? '' : p.name);
+      const m = L.circleMarker([p.lat, p.lon], wish
+        ? { radius: 6, color: '#15803d', weight: 1, opacity: .35, fillColor: '#22c55e', fillOpacity: .2, bubblingMouseEvents: false }
+        : v
         ? { radius: 6, color: manual ? '#111' : '#b45309', weight: 1, opacity: .35, fillColor: '#f59e0b', fillOpacity: .2, bubblingMouseEvents: false }
         : { radius: 6, color: '#b45309', weight: 2, opacity: 1, fillColor: '#f59e0b', fillOpacity: .95, bubblingMouseEvents: false });
       m.bindPopup(() => {
         const el = document.createElement('div');
-        const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : '');
+        const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : wish ? ' (go with Azadeh)' : '');
         const btn = document.createElement('button'); btn.textContent = v ? 'Mark not visited' : 'Mark visited'; btn.style.marginTop = '6px';
         btn.onclick = () => setVisited(p, auto, !v);
         el.append(b, document.createElement('br'), btn);
+        if (!v) {
+          const wb = document.createElement('button'); wb.textContent = wish ? 'Remove from Azadeh list' : 'Go with Azadeh later'; wb.style.marginTop = '6px';
+          wb.onclick = () => setWish(p, !wish);
+          el.append(document.createElement('br'), wb);
+        }
         if (p.custom) {
           const del = document.createElement('button'); del.textContent = 'Delete this place'; del.className = 'alt'; del.style.marginTop = '6px';
           del.onclick = () => { customs = customs.filter(c => c.id !== p.id); delete overrides[p.id]; kvSet('custom', customs); kvSet('overrides', overrides); map.closePopup(); renderPlaces(); };
@@ -418,8 +431,8 @@ $('rw').onclick = async () => {
   tracks = {}; skipped = 0; loadedKeys = allMode ? allLondonKeys() : new Set(viewKeys); await kvSet('tracks', tracks); recomputeStreets(false);
 };
 $('ra').onclick = async () => {
-  if (!confirm('Delete walks, your marks, added places and downloaded map data?')) return;
-  tracks = {}; cells = {}; overrides = {}; customs = []; await kvSet('custom', []); skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false); viewKeys = new Set(); await kvSet('viewKeys', []);
+  if (!confirm('Delete walks, your marks, Azadeh list, added places and downloaded map data?')) return;
+  tracks = {}; cells = {}; overrides = {}; customs = []; await kvSet('custom', []); wishlist = {}; await kvSet('wish', {}); skipped = 0; loadedKeys = new Set(); allMode = false; setAllBtn(); await kvSet('allMode', false); viewKeys = new Set(); await kvSet('viewKeys', []);
   await kvSet('tracks', tracks); await kvSet('cells', cells); await kvSet('overrides', overrides); recomputeStreets(false);
 };
 
@@ -429,6 +442,7 @@ $('ra').onclick = async () => {
   cells = await kvGet('cells', {});
   overrides = await kvGet('overrides', {});
   customs = await kvGet('custom', []);
+  wishlist = await kvGet('wish', {});
   cat = await kvGet('cat', 'cafe'); $('cat').value = cat;
   allMode = await kvGet('allMode', false); setAllBtn();
   viewOnly = await kvGet('viewOnly', true); $('vo').checked = viewOnly;
