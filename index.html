@@ -350,7 +350,7 @@ function setWish(p, on) {
   kvSet('wish', wishlist); msg(`${p.name}: ${on ? 'saved to go with Azadeh' : 'removed from Azadeh list'}`); renderPlaces();
 }
 function setVisited(p, auto, val) {
-  if (val && wishlist[p.id]) { delete wishlist[p.id]; kvSet('wish', wishlist); }
+  if (!val && wishlist[p.id]) { delete wishlist[p.id]; kvSet('wish', wishlist); }
   if (val) overrides[p.id] = true;          // long press / button: done, and it stays done
   else if (auto) overrides[p.id] = false;   // near your path but you say not visited
   else delete overrides[p.id];
@@ -370,7 +370,7 @@ function renderPlaces() {
       if (p.cat !== cat || seen.has(p.id)) continue; seen.add(p.id);
       const auto = near([p.lat, p.lon], 30), manual = p.id in overrides;
       const v = manual ? overrides[p.id] : auto;
-      const wish = !v && !!wishlist[p.id];
+      const wish = v && !!wishlist[p.id];
       tot++; if (v) vis++;
       pLat.push(p.lat); pLon.push(p.lon); pVis.push(v ? 1 : 0); pFade.push(v || wish ? 1 : 0); pName.push(p.name === CATS[p.cat] ? '' : p.name);
       const m = L.circleMarker([p.lat, p.lon], wish
@@ -380,11 +380,11 @@ function renderPlaces() {
         : { radius: 6, color: '#b45309', weight: 2, opacity: 1, fillColor: '#f59e0b', fillOpacity: .95, bubblingMouseEvents: false });
       m.bindPopup(() => {
         const el = document.createElement('div');
-        const b = document.createElement('b'); b.textContent = p.name + (v ? ' ✓' : wish ? ' (go with Azadeh)' : '');
+        const b = document.createElement('b'); b.textContent = p.name + (wish ? ' ✓ (go with Azadeh)' : v ? ' ✓' : '');
         const btn = document.createElement('button'); btn.textContent = v ? 'Mark not visited' : 'Mark visited'; btn.style.marginTop = '6px';
         btn.onclick = () => setVisited(p, auto, !v);
         el.append(b, document.createElement('br'), btn);
-        if (!v) {
+        if (v) {
           const wb = document.createElement('button'); wb.textContent = wish ? 'Remove from Azadeh list' : 'Go with Azadeh later'; wb.style.marginTop = '6px';
           wb.onclick = () => setWish(p, !wish);
           el.append(document.createElement('br'), wb);
